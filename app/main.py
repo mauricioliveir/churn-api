@@ -166,6 +166,7 @@ def predict_churn(data: CustomerInput):
 
     explicabilidade = None
     if previsao == "Vai cancelar":
+        explicabilidade_output = explicabilidade
         explicabilidade = calcular_explicabilidade_local(
             model=artifacts["model"],
             X=X,
@@ -178,7 +179,8 @@ def predict_churn(data: CustomerInput):
         probabilidade=round(proba, 4),
         nivel_risco=nivel_risco,
         recomendacao=gerar_recomendacao(nivel_risco),
-        explicabilidade=explicabilidade,
+        explicabilidade=explicabilidade_output
+        
     )
 
 # =========================================================
