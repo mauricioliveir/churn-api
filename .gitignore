@@ -1,8 +1,3 @@
-# Notebooks e artefatos locais
-notebooks/*.parquet
-notebooks/model/
-Churn_Hackathon.ipynb
-
 # Cache Python
 __pycache__/
 *.pyc
