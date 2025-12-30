@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="ChurnInsight API",
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -73,16 +73,31 @@ def gerar_recomendacao(nivel_risco: str) -> str:
         return "Monitoramento recomendado e campanhas de retenção"
     return "Cliente estável - manutenção padrão"
 
-def calcular_explicabilidade(model, X: np.ndarray, feature_names: List[str]) -> List[str]:
-    if hasattr(model, "coef_"):
-        impactos = np.abs(model.coef_[0] * X[0])
-    elif hasattr(model, "feature_importances_"):
-        impactos = model.feature_importances_
-    else:
-        return []
 
-    top_idx = np.argsort(impactos)[-3:][::-1]
-    return [feature_names[i] for i in top_idx]
+def calcular_explicabilidade_local(
+    model,
+    X: np.ndarray,
+    feature_names: List[str],
+    baseline_proba: float
+) -> List[str]:
+
+    impactos = []
+
+    for i, feature in enumerate(feature_names):
+        X_mod = X.copy()
+
+        X_mod[0, i] = 0
+
+        proba_mod = model.predict_proba(X_mod)[0, 1]
+        impacto = baseline_proba - proba_mod
+
+        impactos.append((feature, impacto))
+
+    impactos_ordenados = sorted(
+        impactos, key=lambda x: x[1], reverse=True
+    )
+
+    return [f[0] for f in impactos_ordenados[:3]]
 
 # =========================================================
 # SCHEMAS
@@ -105,7 +120,7 @@ class PredictionOutput(BaseModel):
     explicabilidade: Optional[List[str]] = None
 
 # =========================================================
-# ENDPOINT
+# ENDPOINT PRINCIPAL
 # =========================================================
 
 @app.post("/previsao", response_model=PredictionOutput)
@@ -114,8 +129,7 @@ def predict_churn(data: CustomerInput):
     if "model" not in artifacts:
         raise HTTPException(status_code=503, detail="Modelo não carregado")
 
-    input_dict = data.model_dump()
-    df = pd.DataFrame([input_dict])
+    df = pd.DataFrame([data.model_dump()])
 
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
@@ -152,8 +166,11 @@ def predict_churn(data: CustomerInput):
 
     explicabilidade = None
     if previsao == "Vai cancelar":
-        explicabilidade = calcular_explicabilidade(
-            artifacts["model"], X, artifacts["columns"]
+        explicabilidade = calcular_explicabilidade_local(
+            model=artifacts["model"],
+            X=X,
+            feature_names=artifacts["columns"],
+            baseline_proba=proba
         )
 
     return PredictionOutput(
@@ -164,29 +181,10 @@ def predict_churn(data: CustomerInput):
         explicabilidade=explicabilidade,
     )
 
+# =========================================================
+# HEALTH
+# =========================================================
 
-# =========================================================
-# ENDPOINT DE DEBUG 
-# =========================================================
-
-@app.get("/debug/model")
-def debug_model():
-    return {
-        "status_carregamento": "OK" if "model" in artifacts else "ERRO",
-        "model_type": str(type(artifacts.get("model"))),
-        "scaler_presente": "scaler" in artifacts,
-        "colunas_esperadas": artifacts.get("columns", []),
-        "threshold_atual": artifacts.get("threshold"),
-        "medianas": {
-            "balance": artifacts.get("balance_median"),
-            "salary": artifacts.get("salary_median"),
-        },
-    }
-    
-# =========================================================
-# ENDPOINT DE HEALTH CHECK 
-# =========================================================   
-    
 @app.get("/health")
 def health_check():
     return {
