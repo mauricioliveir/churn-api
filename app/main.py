@@ -74,9 +74,6 @@ def gerar_recomendacao(nivel_risco: str) -> str:
     return "Cliente estável - manutenção padrão"
 
 def calcular_explicabilidade(model, X: np.ndarray, feature_names: List[str]) -> List[str]:
-    """
-    Retorna as 3 features com maior impacto absoluto
-    """
     if hasattr(model, "coef_"):
         impactos = np.abs(model.coef_[0] * X[0])
     elif hasattr(model, "feature_importances_"):
@@ -92,7 +89,6 @@ def calcular_explicabilidade(model, X: np.ndarray, feature_names: List[str]) -> 
 # =========================================================
 
 class CustomerInput(BaseModel):
-    Surname: str
     CreditScore: int = Field(..., ge=0, le=1000)
     Geography: Literal["France", "Germany", "Spain"]
     Gender: Literal["Male", "Female"]
@@ -102,8 +98,6 @@ class CustomerInput(BaseModel):
     EstimatedSalary: float = Field(..., ge=0)
 
 class PredictionOutput(BaseModel):
-    surname: str
-    classificacao_score: str
     previsao: str
     probabilidade: float
     nivel_risco: str
@@ -167,8 +161,6 @@ def predict_churn(data: CustomerInput):
         )
 
     return PredictionOutput(
-        surname=surname,
-        classificacao_score=classificar_faixa_score(score),
         previsao=previsao,
         probabilidade=round(proba, 4),
         nivel_risco=nivel_risco,
