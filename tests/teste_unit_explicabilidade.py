@@ -1,18 +1,29 @@
-import numpy as np
-from app.main import calcular_explicabilidade
+def test_explicabilidade(client):
 
+    cliente_1 = {
+        "CreditScore": 300,
+        "Geography": "Spain",
+        "Gender": "Male",
+        "Age": 65,
+        "Tenure": 1,
+        "Balance": 200000,
+        "EstimatedSalary": 20000
+    }
 
-class FakeModel:
-    coef_ = np.array([[0.8, 0.1, 0.05]])
+    cliente_2 = {
+        "CreditScore": 800,
+        "Geography": "France",
+        "Gender": "Female",
+        "Age": 30,
+        "Tenure": 8,
+        "Balance": 0,
+        "EstimatedSalary": 90000
+    }
 
+    r1 = client.post("/previsao", json=cliente_1).json()
+    r2 = client.post("/previsao", json=cliente_2).json()
 
-def test_explicabilidade_retorna_top_3():
-    model = FakeModel()
-    X = np.array([[10, 1, 1]])
-    features = ["Age", "Tenure", "Balance"]
+    assert r1["previsao"] == "Vai cancelar"
+    assert r2["previsao"] == "Vai cancelar"
 
-    resultado = calcular_explicabilidade(model, X, features)
-
-    assert isinstance(resultado, list)
-    assert len(resultado) == 3
-    assert resultado[0] == "Age"
+    assert r1["explicabilidade"] != r2["explicabilidade"]

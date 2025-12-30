@@ -6,10 +6,11 @@ from app.main import app, artifacts
 
 
 class DummyModel:
-    coef_ = np.array([[0.4, 0.3, 0.2, 0.1, 0.05, 0.01]])
-
     def predict_proba(self, X):
-        return np.array([[0.1, 0.9]])
+        # Probabilidade depende fortemente da feature 0
+        score = X[0, 0] * 0.6 + X[0, 1] * 0.2
+        proba = 1 / (1 + np.exp(-score))
+        return np.array([[1 - proba, proba]])
 
 
 class DummyScaler:
@@ -28,6 +29,11 @@ def client():
         "Balance",
         "EstimatedSalary",
         "Balance_Salary_Ratio",
+        "Age_Tenure",
+        "High_Value_Customer",
+        "Geography_Germany",
+        "Geography_Spain",
+        "Gender_Male",
     ]
     artifacts["threshold"] = 0.5
     artifacts["balance_median"] = 1000
