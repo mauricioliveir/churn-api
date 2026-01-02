@@ -78,30 +78,44 @@ def calcular_explicabilidade_local(
         "Tenure": "Tenure",
         "Balance": "Balance",
         "EstimatedSalary": "EstimatedSalary",
-        "Geography_Germany": input_data.get("Geography"), 
-        "Geography_Spain": input_data.get("Geography"),
-        "Gender_Male": input_data.get("Gender"),         
-        "Balance_Salary_Ratio": "Balance",      
-        "Age_Tenure": "Age",                    
-        "High_Value_Customer": "Balance"        
+        "Geography_Germany": "Geography_Germany",
+        "Geography_Spain": "Geography_Spain",
+        "Gender_Male": "Gender_Male",
+        "Balance_Salary_Ratio": "Balance_Salary_Ratio",
+        "Age_Tenure": "Age_Tenure",
+        "High_Value_Customer": "High_Value_Customer"
+    }
+    
+    mapeamento_amigavel = {
+        "CreditScore": "Score de Crédito",
+        "Age": "Idade",
+        "Tenure": "Tempo como Cliente",
+        "Balance": "Saldo Bancário",
+        "EstimatedSalary": "Salário Estimado",
+        "Geography_Germany": "Localização (Alemanha)",
+        "Geography_Spain": "Localização (Espanha)",
+        "Gender_Male": "Gênero Masculino",
+        "Balance_Salary_Ratio": "Razão Saldo/Salário",
+        "Age_Tenure": "Idade × Tempo como Cliente",
+        "High_Value_Customer": "Cliente de Alto Valor"
     }
 
     impactos = []
     for i, feature in enumerate(feature_names):
         X_mod = X.copy()
-        X_mod[0, i] = 0 # Perturbação local
+        X_mod[0, i] = 0 
         proba_mod = model.predict_proba(X_mod)[0, 1]
-        impactos.append((feature, baseline_proba - proba_mod))
+        impacto = abs(baseline_proba - proba_mod)
+        impactos.append((feature, impacto))
 
     impactos_ordenados = sorted(impactos, key=lambda x: x[1], reverse=True)
    
     features_finais = []
-    for feat_interna, _ in impactos_ordenados:
-        nome_amigavel = mapeamento_contrato.get(feat_interna)
+    for feat_interna, _ in impactos_ordenados[:3]:  # Pegar as 3 mais importantes
+        nome_original = mapeamento_contrato.get(feat_interna, feat_interna)
+        nome_amigavel = mapeamento_amigavel.get(nome_original, nome_original)
         if nome_amigavel and nome_amigavel not in features_finais:
             features_finais.append(nome_amigavel)
-        if len(features_finais) >= 3:
-            break
 
     return features_finais
 
@@ -135,27 +149,33 @@ def predict_churn(data: CustomerInput):
     input_dict = data.model_dump()
     df = pd.DataFrame([input_dict])
 
-    # 1. One-hot encoding (Sync com Notebook)
     df["Geography_Germany"] = 1 if data.Geography == "Germany" else 0
     df["Geography_Spain"] = 1 if data.Geography == "Spain" else 0
     df["Gender_Male"] = 1 if data.Gender == "Male" else 0
 
-    # 2. Feature Engineering
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
+    
+    balance_median = artifacts.get("balance_median", 0)
+    salary_median = artifacts.get("salary_median", 0)
+    
     df["High_Value_Customer"] = (
-        (df["Balance"] > artifacts.get("balance_median", 0)) &
-        (df["EstimatedSalary"] > artifacts.get("salary_median", 0))
+        (df["Balance"] > balance_median) &
+        (df["EstimatedSalary"] > salary_median)
     ).astype(int)
 
-    # 3. Escalonamento e Predição
-    df_final = df[artifacts["columns"]]
+    required_columns = artifacts.get("columns", [])
+    
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = 0
+    
+    df_final = df[required_columns]
+
     X_scaled = artifacts["scaler"].transform(df_final)
-
     proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
-    threshold = artifacts["threshold"]
+    threshold = artifacts.get("threshold", 0.5)
 
-    # 4. Definição de Risco (Conforme Notebook)
     if proba >= 0.5:
         risco = "ALTO"
     elif proba >= 0.3:
@@ -165,11 +185,10 @@ def predict_churn(data: CustomerInput):
 
     previsao = "Vai cancelar" if proba >= threshold else "Vai continuar"
 
-    # 5. Explicabilidade
     explicabilidade_output = None
-    if previsao == "Vai cancelar":
+    if previsao == "Vai cancelar" or risco == "ALTO":
         explicabilidade_output = calcular_explicabilidade_local(
-            artifacts["model"], X_scaled, artifacts["columns"], proba, input_dict
+            artifacts["model"], X_scaled, required_columns, proba, input_dict
         )
 
     return PredictionOutput(
@@ -188,5 +207,40 @@ def health_check():
     return {
         "status": "UP",
         "model_loaded": "model" in artifacts,
-        "scaler_loaded": "scaler" in artifacts
+        "scaler_loaded": "scaler" in artifacts,
+        "columns_loaded": "columns" in artifacts,
+        "threshold_loaded": "threshold" in artifacts
     }
+
+# =========================================================
+# TEST ENDPOINT
+# =========================================================
+@app.get("/test-cases")
+def test_cases():
+    test_cases = [
+        {
+            "name": "Cliente Alto Risco - Exemplo 1",
+            "data": {
+                "CreditScore": 500,
+                "Geography": "Germany",
+                "Gender": "Female",
+                "Age": 45,
+                "Tenure": 2,
+                "Balance": 125000.0,
+                "EstimatedSalary": 180000.0
+            }
+        },
+        {
+            "name": "Cliente Alto Risco - Exemplo 2",
+            "data": {
+                "CreditScore": 350,
+                "Geography": "Germany",
+                "Gender": "Female",
+                "Age": 55,
+                "Tenure": 8,
+                "Balance": 0.0,
+                "EstimatedSalary": 15000.0
+            }
+        }
+    ]
+    return test_cases
