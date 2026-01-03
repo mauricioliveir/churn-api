@@ -1,13 +1,17 @@
-import os
-import logging
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from typing import Literal, Optional, List
+from pathlib import Path
 
+import os
+import logging
 import joblib
 import pandas as pd
 import numpy as np
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+import tempfile
+
 
 # =========================================================
 # LOGGING
@@ -204,6 +208,121 @@ def predict_churn(data: CustomerInput):
         nivel_risco=risco,
         recomendacao=gerar_recomendacao(risco),
         explicabilidade=explicabilidade
+    )
+
+# =========================================================
+# ENDPOINT PREVISAO LOTE
+# =========================================================
+@app.post("/previsao-lote")
+def previsao_lote(file: UploadFile = File(...)):
+
+    if not artifacts:
+        raise HTTPException(status_code=503, detail="Modelo não carregado")
+
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(status_code=400, detail="Arquivo deve ser CSV")
+
+    df = pd.read_csv(file.file)
+
+    colunas_necessarias = artifacts["raw_columns"]
+    colunas_faltantes = set(colunas_necessarias) - set(df.columns)
+
+    if colunas_faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Colunas ausentes no CSV: {list(colunas_faltantes)}"
+        )
+
+    threshold = artifacts["threshold_cost"]
+    resultados = []
+
+    for _, row in df.iterrows():
+
+        problemas = []
+
+        for col in colunas_necessarias:
+            if pd.isna(row[col]):
+                problemas.append(col)
+
+        for col, stats in artifacts["numeric_stats"].items():
+            if col in row and not pd.isna(row[col]):
+                z = abs((row[col] - stats["mean"]) / stats["std"])
+                if z > 3:
+                    problemas.append(col)
+
+        erro_linha = len(problemas) > 0
+        explicabilidade = None
+
+        try:
+            input_dict = row.to_dict()
+            df_linha = pd.DataFrame([input_dict])
+
+            df_linha["Geography_Germany"] = int(row["Geography"] == "Germany")
+            df_linha["Geography_Spain"] = int(row["Geography"] == "Spain")
+            df_linha["Gender_Male"] = int(row["Gender"] == "Male")
+
+            df_linha["Balance_Salary_Ratio"] = row["Balance"] / (row["EstimatedSalary"] + 1)
+            df_linha["Age_Tenure"] = row["Age"] * row["Tenure"]
+
+            df_linha["High_Value_Customer"] = int(
+                row["Balance"] > artifacts["balance_median"] and
+                row["EstimatedSalary"] > artifacts["salary_median"]
+            )
+
+            for col in artifacts["columns"]:
+                if col not in df_linha:
+                    df_linha[col] = 0
+
+            df_linha = df_linha[artifacts["columns"]]
+            X_scaled = artifacts["scaler"].transform(df_linha)
+
+            proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
+
+            if proba >= threshold:
+                risco = "ALTO"
+                previsao = "Vai Sair"
+            elif proba >= 0.20:
+                risco = "MÉDIO"
+                previsao = "Vai Sair"
+            else:
+                risco = "BAIXO"
+                previsao = "Vai Ficar"
+
+            if risco == "ALTO":
+                explicabilidade = calcular_explicabilidade_local(
+                    artifacts["model"],
+                    X_scaled,
+                    artifacts["columns"],
+                    proba,
+                    input_dict
+                )
+
+        except Exception:
+            previsao = "Erro"
+            risco = "Erro"
+            proba = None
+            problemas.append("Erro processamento")
+
+        resultados.append({
+            **row.to_dict(),
+            "previsao": previsao,
+            "probabilidade": float(f"{proba:.2f}") if proba is not None else None,
+            "nivel_risco": risco,
+            "explicabilidade": "|".join(explicabilidade) if explicabilidade else None,
+            "erro_linha": erro_linha,
+            "colunas_problema": ",".join(set(problemas))
+        })
+
+    df_resultado = pd.DataFrame(resultados)
+
+    nome_saida = file.filename.replace(".csv", "_previsionado.csv")
+    output_path = Path(tempfile.gettempdir()) / nome_saida
+    df_resultado.to_csv(output_path, index=False)
+
+    return FileResponse(
+        output_path,
+        media_type="text/csv",
+        filename=nome_saida
     )
 
 # =========================================================
