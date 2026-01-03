@@ -71,9 +71,6 @@ def calcular_explicabilidade_local(
     baseline_proba: float, 
     input_data: dict 
 ) -> List[str]:
-    """
-    Retorna lista com as 3 principais features do contrato original
-    """
 
     mapeamento_para_contrato = {
         "CreditScore": "CreditScore",
@@ -144,62 +141,67 @@ class PredictionOutput(BaseModel):
 # =========================================================
 @app.post("/previsao", response_model=PredictionOutput)
 def predict_churn(data: CustomerInput):
+
     if not artifacts:
         raise HTTPException(status_code=503, detail="Modelo não carregado")
 
     input_dict = data.model_dump()
     df = pd.DataFrame([input_dict])
-    df["Geography_Germany"] = 1 if data.Geography == "Germany" else 0
-    df["Geography_Spain"] = 1 if data.Geography == "Spain" else 0
-    df["Gender_Male"] = 1 if data.Gender == "Male" else 0
+    df["Geography_Germany"] = int(data.Geography == "Germany")
+    df["Geography_Spain"] = int(data.Geography == "Spain")
+    df["Gender_Male"] = int(data.Gender == "Male")
+
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
 
-    balance_median = artifacts.get("balance_median", 0)
-    salary_median = artifacts.get("salary_median", 0)
-    
     df["High_Value_Customer"] = (
-        (df["Balance"] > balance_median) &
-        (df["EstimatedSalary"] > salary_median)
+        (df["Balance"] > artifacts["balance_median"]) &
+        (df["EstimatedSalary"] > artifacts["salary_median"])
     ).astype(int)
 
-    required_columns = artifacts.get("columns", [])
-
-    for col in required_columns:
-        if col not in df.columns:
+    for col in artifacts["columns"]:
+        if col not in df:
             df[col] = 0
 
-    df_final = df[required_columns]
+    df = df[artifacts["columns"]]
 
-    X_scaled = artifacts["scaler"].transform(df_final)
+    X_scaled = artifacts["scaler"].transform(df)
 
-    proba_raw = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
-    proba_percentual = proba_raw * 100.0
-    proba = round(proba_percentual, 1)
-    
-    threshold = artifacts.get("threshold", 0.5) * 100.0
+    proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
 
-    if proba >= 40.0:
+    threshold_cost = artifacts["threshold_cost"]
+    acao_retencao = proba >= threshold_cost
+
+    if proba >= 0.40:
         risco = "ALTO"
-    elif proba >= 20.0:
+    elif proba >= 0.20:
         risco = "MÉDIO"
     else:
         risco = "BAIXO"
 
-    previsao = "Vai cancelar" if proba >= threshold else "Vai continuar"
+    if risco == "ALTO":
+        previsao = "Alta probabilidade de churn"
+    elif risco == "MÉDIO":
+        previsao = "Risco moderado de churn"
+    else:
+        previsao = "Baixo risco de churn"
 
-    explicabilidade_output = None
-    if previsao == "Vai cancelar" or risco == "ALTO":
-        explicabilidade_output = calcular_explicabilidade_local(
-            artifacts["model"], X_scaled, required_columns, proba_raw, input_dict
+    explicabilidade = None
+    if risco in ["ALTO", "MÉDIO"]:
+        explicabilidade = calcular_explicabilidade_local(
+            artifacts["model"],
+            X_scaled,
+            artifacts["columns"],
+            proba,
+            input_dict
         )
 
     return PredictionOutput(
         previsao=previsao,
-        probabilidade=proba,
+        probabilidade=round(proba * 100, 1),
         nivel_risco=risco,
         recomendacao=gerar_recomendacao(risco),
-        explicabilidade=explicabilidade_output
+        explicabilidade=explicabilidade
     )
 
 # =========================================================
