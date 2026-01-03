@@ -1,7 +1,7 @@
 import os
 import logging
 from contextlib import asynccontextmanager
-from typing import Literal, Optional, List, Dict, Any
+from typing import Literal, Optional, List
 
 import joblib
 import pandas as pd
@@ -9,19 +9,21 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+
 # =========================================================
 # LOGGING
 # =========================================================
 logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
 logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
 
+
 # =========================================================
-# PATHS
+# PATHS / ARTIFACTS
 # =========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "model.joblib")
-
 artifacts: dict = {}
+
 
 # =========================================================
 # LIFESPAN
@@ -30,49 +32,58 @@ artifacts: dict = {}
 async def lifespan(app: FastAPI):
     if not os.path.exists(MODEL_PATH):
         raise RuntimeError(f"Modelo não encontrado em {MODEL_PATH}")
-        
+
     loaded = joblib.load(MODEL_PATH)
 
+    required_keys = {
+        "model",
+        "scaler",
+        "columns",
+        "threshold_cost",
+        "balance_median",
+        "salary_median",
+        "model_version"
+    }
+
+    missing = required_keys - set(loaded.keys())
+    if missing:
+        raise RuntimeError(f"Artefato inválido. Chaves ausentes: {missing}")
+
     artifacts.update(loaded)
-    print("✅ Pipeline carregado com sucesso")
     yield
+
 
 # =========================================================
 # FASTAPI
 # =========================================================
-
 app = FastAPI(
-    title="ChurnInsight API", 
-    version="1.2.1", 
+    title="ChurnInsight API",
+    version="1.2.1",
     lifespan=lifespan
 )
+
 
 # =========================================================
 # UTILS
 # =========================================================
-def classificar_faixa_score(score: int) -> str:
-    if score >= 701: return "Excelente"
-    if score >= 501: return "Bom"
-    if score >= 301: return "Regular"
-    return "Baixo"
-    
 def gerar_recomendacao(nivel_risco: str) -> str:
-    recomendas = {
+    mapa = {
         "ALTO": "Ação imediata recomendada: contato ativo e oferta personalizada",
         "MÉDIO": "Monitoramento recomendado e campanhas de retenção",
         "BAIXO": "Cliente estável - manutenção padrão"
     }
-    return recomendas.get(nivel_risco, "Manutenção padrão")
+    return mapa.get(nivel_risco, "Manutenção padrão")
+
 
 def calcular_explicabilidade_local(
     model,
     X: np.ndarray,
     feature_names: List[str],
-    baseline_proba: float, 
-    input_data: dict 
+    baseline_proba: float,
+    input_data: dict
 ) -> List[str]:
 
-    mapeamento_para_contrato = {
+    mapeamento = {
         "CreditScore": "CreditScore",
         "Age": "Age",
         "Tenure": "Tenure",
@@ -89,33 +100,31 @@ def calcular_explicabilidade_local(
     impactos = []
     for i, feature in enumerate(feature_names):
         X_mod = X.copy()
-        X_mod[0, i] = 0 
+        X_mod[0, i] = 0
         proba_mod = model.predict_proba(X_mod)[0, 1]
-        impacto = abs(baseline_proba - proba_mod)
-        impactos.append((feature, impacto))
+        impactos.append((feature, abs(baseline_proba - proba_mod)))
 
-    impactos_ordenados = sorted(impactos, key=lambda x: x[1], reverse=True)
+    impactos = sorted(impactos, key=lambda x: x[1], reverse=True)
 
-    features_contrato = []
-    for feat_interna, _ in impactos_ordenados:
-        feature_contrato = mapeamento_para_contrato.get(feat_interna)
-        
-        if feature_contrato:
-            if feature_contrato == "Geography":
-                valor = input_data.get("Geography")
-                if valor and valor not in features_contrato:
-                    features_contrato.append(valor)
-            elif feature_contrato == "Gender":
-                valor = input_data.get("Gender")
-                if valor and valor not in features_contrato:
-                    features_contrato.append(valor)
-            elif feature_contrato not in features_contrato:
-                features_contrato.append(feature_contrato)
-        
-        if len(features_contrato) >= 3:
+    features_saida = []
+    for feat, _ in impactos:
+        contrato = mapeamento.get(feat)
+        if not contrato:
+            continue
+
+        if contrato in ("Geography", "Gender"):
+            valor = input_data.get(contrato)
+            if valor and valor not in features_saida:
+                features_saida.append(valor)
+        else:
+            if contrato not in features_saida:
+                features_saida.append(contrato)
+
+        if len(features_saida) == 3:
             break
-    
-    return features_contrato
+
+    return features_saida
+
 
 # =========================================================
 # SCHEMAS
@@ -129,6 +138,7 @@ class CustomerInput(BaseModel):
     Balance: float = Field(..., ge=0)
     EstimatedSalary: float = Field(..., ge=0)
 
+
 class PredictionOutput(BaseModel):
     previsao: str
     probabilidade: float
@@ -136,8 +146,9 @@ class PredictionOutput(BaseModel):
     recomendacao: str
     explicabilidade: Optional[List[str]] = None
 
+
 # =========================================================
-# ENDPOINT
+# ENDPOINT PREVISAO
 # =========================================================
 @app.post("/previsao", response_model=PredictionOutput)
 def predict_churn(data: CustomerInput):
@@ -147,6 +158,7 @@ def predict_churn(data: CustomerInput):
 
     input_dict = data.model_dump()
     df = pd.DataFrame([input_dict])
+
     df["Geography_Germany"] = int(data.Geography == "Germany")
     df["Geography_Spain"] = int(data.Geography == "Spain")
     df["Gender_Male"] = int(data.Gender == "Male")
@@ -164,17 +176,14 @@ def predict_churn(data: CustomerInput):
             df[col] = 0
 
     df = df[artifacts["columns"]]
-
     X_scaled = artifacts["scaler"].transform(df)
 
     proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
+    threshold = artifacts["threshold_cost"]
 
-    threshold_cost = artifacts["threshold_cost"]
-    acao_retencao = proba >= threshold_cost
-
-    if proba >= 0.40:
+    if proba >= threshold:
         risco = "ALTO"
-    elif proba >= 0.20:
+    elif proba >= 0.6 * threshold:
         risco = "MÉDIO"
     else:
         risco = "BAIXO"
@@ -187,7 +196,7 @@ def predict_churn(data: CustomerInput):
         previsao = "Baixo risco de churn"
 
     explicabilidade = None
-    if risco in ["ALTO", "MÉDIO"]:
+    if risco in ("ALTO", "MÉDIO"):
         explicabilidade = calcular_explicabilidade_local(
             artifacts["model"],
             X_scaled,
@@ -204,92 +213,17 @@ def predict_churn(data: CustomerInput):
         explicabilidade=explicabilidade
     )
 
+
 # =========================================================
 # HEALTH
 # =========================================================
 @app.get("/health")
-def health_check():
+def health():
     return {
         "status": "UP",
-        "model_loaded": "model" in artifacts,
-        "scaler_loaded": "scaler" in artifacts,
-        "columns_loaded": "columns" in artifacts,
-        "threshold_loaded": "threshold" in artifacts,
-        "threshold_percentual": artifacts.get("threshold", 0.5) * 100.0 if "threshold" in artifacts else None
-    }
-
-# =========================================================
-# TEST CASES
-# =========================================================
-@app.post("/test-case-1")
-def test_case_1():
-    data = CustomerInput(
-        CreditScore=500,
-        Geography="Germany",
-        Gender="Female",
-        Age=45,
-        Tenure=2,
-        Balance=125000.0,
-        EstimatedSalary=180000.0
-    )
-    return predict_churn(data)
-
-@app.post("/test-case-2")
-def test_case_2():
-    data = CustomerInput(
-        CreditScore=350,
-        Geography="Germany",
-        Gender="Female",
-        Age=55,
-        Tenure=8,
-        Balance=0.0,
-        EstimatedSalary=15000.0
-    )
-    return predict_churn(data)
-
-@app.post("/test-case-baixo")
-def test_case_baixo():
-    data = CustomerInput(
-        CreditScore=850,
-        Geography="France",
-        Gender="Male",
-        Age=30,
-        Tenure=10,
-        Balance=10000.0,
-        EstimatedSalary=50000.0
-    )
-    return predict_churn(data)
-
-@app.post("/test-case-medio")
-def test_case_medio():
-    data = CustomerInput(
-        CreditScore=600,
-        Geography="Spain",
-        Gender="Female",
-        Age=40,
-        Tenure=3,
-        Balance=50000.0,
-        EstimatedSalary=60000.0
-    )
-    return predict_churn(data)
-
-@app.get("/")
-def root():
-    return {
-        "message": "ChurnInsight API",
-        "version": "1.2.1",
-        "escala_probabilidade": "0.0 a 99.9 (percentual)",
-        "faixas_risco": {
-            "ALTO": "≥ 40.0%",
-            "MÉDIO": "20.0% a 39.9%",
-            "BAIXO": "0.0% a 19.9%"
-        },
-        "endpoints": {
-            "POST /previsao": "Fazer previsão de churn",
-            "GET /health": "Verificar saúde da API",
-            "POST /test-case-1": "Cliente alto risco (exemplo 1)",
-            "POST /test-case-2": "Cliente alto risco (exemplo 2)",
-            "POST /test-case-medio": "Cliente risco médio",
-            "POST /test-case-baixo": "Cliente baixo risco"
-        }
+        "model_version": artifacts.get("model_version"),
+        "threshold_cost": artifacts.get("threshold_cost"),
+        "features_count": artifacts.get("features_count"),
+        "trained_at": artifacts.get("trained_at"),
+        "sklearn_version": artifacts.get("sklearn_version")
     }
