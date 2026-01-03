@@ -1,8 +1,7 @@
-
 from pathlib import Path
-from typing import Dict
-from fastapi.responses import Response, FileResponse
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+from typing import Dict, List
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks, Request
+from fastapi.responses import FileResponse, Response
 
 import uuid
 import joblib
@@ -23,7 +22,7 @@ TMP_DIR = Path(tempfile.gettempdir())
 # APP
 # =========================================================
 
-app = FastAPI(title="Churn API", version="1.0.0")
+app = FastAPI(title="Churn API", version="2.0.0")
 
 artifacts: Dict = {}
 
@@ -38,39 +37,29 @@ def load_artifacts():
 
     loaded = joblib.load(MODEL_PATH)
 
-    required_keys = {"model", "scaler", "threshold_cost", "columns"}
-    missing = required_keys - set(loaded.keys())
+    required = {"model", "scaler", "threshold_cost", "columns"}
+    missing = required - set(loaded.keys())
 
     if missing:
         raise RuntimeError(f"Artefatos faltando no model.joblib: {missing}")
 
     artifacts.update(loaded)
     print("✅ Modelo carregado com sucesso")
-    
+
 # =========================================================
-# HEADER STATUS
+# ROOT / HEALTH / HEAD
 # =========================================================
 
 @app.get("/")
+@app.head("/")
 def root():
     return {
         "service": "Churn API",
-        "render": "ok",
-        "api": "online",
-        "modelo_carregado": bool(artifacts),
-        "version": "1.0.0"
+        "status": "online",
+        "model_loaded": bool(artifacts),
+        "version": "2.0.0",
+        "environment": "render"
     }
- 
- 
- # =========================================================
-# SILENCED FAVICON
-# =========================================================   
-@app.get("/favicon.ico")
-def favicon():
-    return Response(status_code=204)   
-# =========================================================
-# HEALTH
-# =========================================================
 
 @app.get("/health")
 def health():
@@ -79,17 +68,17 @@ def health():
         "model_loaded": bool(artifacts)
     }
 
+@app.get("/favicon.ico")
+def favicon():
+    return Response(status_code=204)
+
 # =========================================================
 # PREPARAÇÃO DE DADOS
 # =========================================================
 
 def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-
-    # One-hot encoding básico
     df = pd.get_dummies(df, columns=["Geography", "Gender"], drop_first=True)
 
-    # Garantir colunas esperadas pelo modelo
     for col in artifacts["columns"]:
         if col not in df.columns:
             df[col] = 0
@@ -97,26 +86,94 @@ def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df[artifacts["columns"]]
 
 # =========================================================
-# PROCESSAMENTO EM BACKGROUND
+# EXPLICABILIDADE LOCAL (TOP 3)
+# =========================================================
+
+def calcular_explicabilidade_local(
+    X_scaled: np.ndarray,
+    payload: Dict
+) -> List[str]:
+    model = artifacts["model"]
+    coef = model.coef_[0]
+    features = artifacts["columns"]
+
+    impactos = coef * X_scaled[0]
+
+    ranking = sorted(
+        zip(features, impactos),
+        key=lambda x: abs(x[1]),
+        reverse=True
+    )[:3]
+
+    explicabilidade = []
+
+    for feature, _ in ranking:
+        if feature.startswith("Geography_"):
+            explicabilidade.append(payload["Geography"])
+        elif feature.startswith("Gender_"):
+            explicabilidade.append(payload["Gender"])
+        else:
+            explicabilidade.append(feature)
+
+    return explicabilidade
+
+# =========================================================
+# ENDPOINT /previsao (SÍNCRONO)
+# =========================================================
+
+@app.post("/previsao")
+def previsao(payload: Dict):
+    if not artifacts:
+        raise HTTPException(status_code=503, detail="Modelo não carregado")
+
+    colunas = [
+        "CreditScore",
+        "Geography",
+        "Gender",
+        "Age",
+        "Tenure",
+        "Balance",
+        "EstimatedSalary",
+    ]
+
+    faltantes = set(colunas) - set(payload.keys())
+    if faltantes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Colunas ausentes: {list(faltantes)}"
+        )
+
+    df = pd.DataFrame([payload])
+    df_proc = preparar_dataframe(df)
+    X_scaled = artifacts["scaler"].transform(df_proc)
+
+    proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
+    threshold = artifacts["threshold_cost"]
+
+    risco = "ALTO" if proba >= threshold else "BAIXO"
+    previsao = "Vai cancelar" if risco == "ALTO" else "Vai permanecer"
+
+    explicabilidade = calcular_explicabilidade_local(X_scaled, payload)
+
+    return {
+        "previsao": previsao,
+        "probabilidade": round(proba, 4),
+        "nivel_risco": risco,
+        "recomendacao": (
+            "Ação imediata recomendada: contato ativo e oferta personalizada"
+            if risco == "ALTO"
+            else "Cliente estável"
+        ),
+        "explicabilidade": explicabilidade
+    }
+
+# =========================================================
+# PROCESSAMENTO EM BACKGROUND (CSV GRANDE)
 # =========================================================
 
 def processar_csv(job_id: str, input_path: Path):
     try:
         df = pd.read_csv(input_path)
-
-        colunas_necessarias = [
-            "CreditScore",
-            "Geography",
-            "Gender",
-            "Age",
-            "Tenure",
-            "Balance",
-            "EstimatedSalary",
-        ]
-
-        faltantes = set(colunas_necessarias) - set(df.columns)
-        if faltantes:
-            raise ValueError(f"Colunas ausentes: {list(faltantes)}")
 
         df_proc = preparar_dataframe(df)
         X_scaled = artifacts["scaler"].transform(df_proc)
@@ -126,77 +183,27 @@ def processar_csv(job_id: str, input_path: Path):
 
         df["probabilidade"] = probs.round(4)
         df["nivel_risco"] = np.where(probs >= threshold, "ALTO", "BAIXO")
-        df["previsao"] = np.where(df["nivel_risco"] == "ALTO", "Vai Sair", "Vai Ficar")
-
-        output_path = TMP_DIR / f"{job_id}_resultado.csv"
-        df.to_csv(output_path, index=False)
-
-    except Exception as e:
-        error_path = TMP_DIR / f"{job_id}.error"
-        error_path.write_text(str(e))
-        
-# =========================================================
-# ENDPOINT DE PREVISÃO
-# =========================================================       
-@app.post("/previsao")
-def previsao(payload: Dict):
-    if not artifacts:
-        raise HTTPException(status_code=503, detail="Modelo não carregado")
-
-    try:
-        df = pd.DataFrame([payload])
-
-        colunas_necessarias = [
-            "CreditScore",
-            "Geography",
-            "Gender",
-            "Age",
-            "Tenure",
-            "Balance",
-            "EstimatedSalary",
-        ]
-
-        faltantes = set(colunas_necessarias) - set(df.columns)
-        if faltantes:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Colunas ausentes: {list(faltantes)}"
-            )
-
-        df_proc = preparar_dataframe(df)
-        X_scaled = artifacts["scaler"].transform(df_proc)
-
-        proba = float(
-            artifacts["model"].predict_proba(X_scaled)[0, 1]
+        df["previsao"] = np.where(
+            df["nivel_risco"] == "ALTO",
+            "Vai cancelar",
+            "Vai permanecer"
         )
 
-        threshold = artifacts["threshold_cost"]
+        output = TMP_DIR / f"{job_id}_resultado.csv"
+        df.to_csv(output, index=False)
 
-        risco = "ALTO" if proba >= threshold else "BAIXO"
-        previsao = "Vai Sair" if risco == "ALTO" else "Vai Ficar"
-
-        return {
-            "previsao": previsao,
-            "probabilidade": round(proba, 4),
-            "nivel_risco": risco
-        }
-
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        (TMP_DIR / f"{job_id}.error").write_text(str(e))
 
 # =========================================================
-# ENDPOINT DE PREVISÃO EM LOTE
+# ENDPOINT CSV ASSÍNCRONO
 # =========================================================
+
 @app.post("/previsao-lote")
 def previsao_lote(
     file: UploadFile = File(...),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    if not artifacts:
-        raise HTTPException(status_code=503, detail="Modelo não carregado")
-
     if not file.filename.endswith(".csv"):
         raise HTTPException(status_code=400, detail="Arquivo deve ser CSV")
 
@@ -213,32 +220,21 @@ def previsao_lote(
         "status": "PROCESSANDO"
     }
 
-# =========================================================
-
 @app.get("/previsao-lote/status/{job_id}")
-def status(job_id: str):
-    result_path = TMP_DIR / f"{job_id}_resultado.csv"
-    error_path = TMP_DIR / f"{job_id}.error"
+def status_lote(job_id: str):
+    if (TMP_DIR / f"{job_id}.error").exists():
+        return {"status": "ERRO"}
 
-    if error_path.exists():
-        return {"status": "ERRO", "detail": error_path.read_text()}
-
-    if result_path.exists():
+    if (TMP_DIR / f"{job_id}_resultado.csv").exists():
         return {"status": "FINALIZADO"}
 
     return {"status": "PROCESSANDO"}
 
-# =========================================================
-
 @app.get("/previsao-lote/download/{job_id}")
 def download(job_id: str):
-    result_path = TMP_DIR / f"{job_id}_resultado.csv"
+    path = TMP_DIR / f"{job_id}_resultado.csv"
 
-    if not result_path.exists():
-        raise HTTPException(status_code=404, detail="Arquivo ainda não disponível")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Arquivo não disponível")
 
-    return FileResponse(
-        path=result_path,
-        filename=result_path.name,
-        media_type="text/csv"
-    )
+    return FileResponse(path, filename=path.name, media_type="text/csv")
