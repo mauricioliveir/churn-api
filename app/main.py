@@ -70,7 +70,10 @@ def calcular_explicabilidade_local(
     feature_names: List[str],
     baseline_proba: float, 
     input_data: dict 
-) -> Dict[str, str]:
+) -> List[str]:
+    """
+    Retorna lista com as 3 principais features do contrato original
+    """
 
     mapeamento_para_contrato = {
         "CreditScore": "CreditScore",
@@ -78,29 +81,13 @@ def calcular_explicabilidade_local(
         "Tenure": "Tenure",
         "Balance": "Balance",
         "EstimatedSalary": "EstimatedSalary",
-
         "Geography_Germany": "Geography",
         "Geography_Spain": "Geography",
-
         "Gender_Male": "Gender",
-
         "Balance_Salary_Ratio": "Balance",
         "Age_Tenure": "Age",
         "High_Value_Customer": "Balance"
     }
-
-    nome_para_exibicao = {
-        "CreditScore": "CreditScore",
-        "Age": "Age",
-        "Tenure": "Tenure",
-        "Balance": "Balance",
-        "EstimatedSalary": "EstimatedSalary",
-        "Geography": "Geography",
-        "Gender": "Gender"
-    }
-
-    geography_value = input_data.get("Geography")
-    gender_value = input_data.get("Gender")
 
     impactos = []
     for i, feature in enumerate(feature_names):
@@ -111,27 +98,27 @@ def calcular_explicabilidade_local(
         impactos.append((feature, impacto))
 
     impactos_ordenados = sorted(impactos, key=lambda x: x[1], reverse=True)
-   
+
     features_contrato = []
     for feat_interna, _ in impactos_ordenados:
         feature_contrato = mapeamento_para_contrato.get(feat_interna)
         
-        if feature_contrato and feature_contrato not in features_contrato:
-            if feature_contrato == "Geography" and geography_value:
-                features_contrato.append(geography_value)
-            elif feature_contrato == "Gender" and gender_value:
-                features_contrato.append(gender_value)
-            elif feature_contrato in nome_para_exibicao:
-                features_contrato.append(nome_para_exibicao[feature_contrato])
+        if feature_contrato:
+            if feature_contrato == "Geography":
+                valor = input_data.get("Geography")
+                if valor and valor not in features_contrato:
+                    features_contrato.append(valor)
+            elif feature_contrato == "Gender":
+                valor = input_data.get("Gender")
+                if valor and valor not in features_contrato:
+                    features_contrato.append(valor)
+            elif feature_contrato not in features_contrato:
+                features_contrato.append(feature_contrato)
         
         if len(features_contrato) >= 3:
             break
-
-    explicabilidade_dict = {}
-    for i, feature in enumerate(features_contrato, 1):
-        explicabilidade_dict[f"feature_{i}"] = feature
     
-    return explicabilidade_dict
+    return features_contrato
 
 # =========================================================
 # SCHEMAS
@@ -150,7 +137,7 @@ class PredictionOutput(BaseModel):
     probabilidade: float
     nivel_risco: str
     recomendacao: str
-    explicabilidade: Optional[Dict[str, str]] = None
+    explicabilidade: Optional[List[str]] = None
 
 # =========================================================
 # ENDPOINT
@@ -167,7 +154,7 @@ def predict_churn(data: CustomerInput):
     df["Gender_Male"] = 1 if data.Gender == "Male" else 0
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
-    
+
     balance_median = artifacts.get("balance_median", 0)
     salary_median = artifacts.get("salary_median", 0)
     
@@ -177,36 +164,39 @@ def predict_churn(data: CustomerInput):
     ).astype(int)
 
     required_columns = artifacts.get("columns", [])
-    
+
     for col in required_columns:
         if col not in df.columns:
             df[col] = 0
-    
+
     df_final = df[required_columns]
 
     X_scaled = artifacts["scaler"].transform(df_final)
-    proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
-    threshold = artifacts.get("threshold", 0.5)
 
-    if proba >= 0.5:
+    proba_raw = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
+    proba_percentual = proba_raw * 100.0
+    proba = round(proba_percentual, 1)
+    
+    threshold = artifacts.get("threshold", 0.5) * 100.0
+
+    if proba >= 50.0:
         risco = "ALTO"
-    elif proba >= 0.3:
+    elif proba >= 20.0:
         risco = "MÉDIO"
     else:
         risco = "BAIXO"
 
     previsao = "Vai cancelar" if proba >= threshold else "Vai continuar"
 
-    # 6. Explicabilidade
     explicabilidade_output = None
     if previsao == "Vai cancelar" or risco == "ALTO":
         explicabilidade_output = calcular_explicabilidade_local(
-            artifacts["model"], X_scaled, required_columns, proba, input_dict
+            artifacts["model"], X_scaled, required_columns, proba_raw, input_dict
         )
 
     return PredictionOutput(
         previsao=previsao,
-        probabilidade=round(proba, 4),
+        probabilidade=proba,
         nivel_risco=risco,
         recomendacao=gerar_recomendacao(risco),
         explicabilidade=explicabilidade_output
@@ -222,7 +212,8 @@ def health_check():
         "model_loaded": "model" in artifacts,
         "scaler_loaded": "scaler" in artifacts,
         "columns_loaded": "columns" in artifacts,
-        "threshold_loaded": "threshold" in artifacts
+        "threshold_loaded": "threshold" in artifacts,
+        "threshold_percentual": artifacts.get("threshold", 0.5) * 100.0 if "threshold" in artifacts else None
     }
 
 # =========================================================
@@ -230,7 +221,6 @@ def health_check():
 # =========================================================
 @app.post("/test-case-1")
 def test_case_1():
-    """Teste do primeiro caso: Cliente com alto balance e salário"""
     data = CustomerInput(
         CreditScore=500,
         Geography="Germany",
@@ -244,7 +234,6 @@ def test_case_1():
 
 @app.post("/test-case-2")
 def test_case_2():
-    """Teste do segundo caso: Cliente com risco muito alto"""
     data = CustomerInput(
         CreditScore=350,
         Geography="Germany",
@@ -255,3 +244,50 @@ def test_case_2():
         EstimatedSalary=15000.0
     )
     return predict_churn(data)
+
+@app.post("/test-case-baixo")
+def test_case_baixo():
+    data = CustomerInput(
+        CreditScore=850,
+        Geography="France",
+        Gender="Male",
+        Age=30,
+        Tenure=10,
+        Balance=10000.0,
+        EstimatedSalary=50000.0
+    )
+    return predict_churn(data)
+
+@app.post("/test-case-medio")
+def test_case_medio():
+    data = CustomerInput(
+        CreditScore=600,
+        Geography="Spain",
+        Gender="Female",
+        Age=40,
+        Tenure=3,
+        Balance=50000.0,
+        EstimatedSalary=60000.0
+    )
+    return predict_churn(data)
+
+@app.get("/")
+def root():
+    return {
+        "message": "ChurnInsight API",
+        "version": "1.2.1",
+        "escala_probabilidade": "0.0 a 99.9 (percentual)",
+        "faixas_risco": {
+            "ALTO": "≥ 50.0%",
+            "MÉDIO": "20.0% a 49.9%",
+            "BAIXO": "0.0% a 19.9%"
+        },
+        "endpoints": {
+            "POST /previsao": "Fazer previsão de churn",
+            "GET /health": "Verificar saúde da API",
+            "POST /test-case-1": "Cliente alto risco (exemplo 1)",
+            "POST /test-case-2": "Cliente alto risco (exemplo 2)",
+            "POST /test-case-medio": "Cliente risco médio",
+            "POST /test-case-baixo": "Cliente baixo risco"
+        }
+    }
