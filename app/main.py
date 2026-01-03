@@ -5,11 +5,50 @@ import pandas as pd
 import numpy as np
 import joblib
 import tempfile
-import uuid
+import os
+import logging
+from contextlib import asynccontextmanager
 
-app = FastAPI(title="Churn API")
+# =========================================================
+logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
+logging.getLogger("uvicorn.access").setLevel(logging.ERROR)
 
-artifacts = {}
+# =========================================================
+
+# =========================================================
+# PATHS
+# =========================================================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(BASE_DIR, "models", "model.joblib")
+
+artifacts: dict = {}
+
+# =========================================================
+# LIFESPAN
+# =========================================================
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not os.path.exists(MODEL_PATH):
+        raise RuntimeError(f"Modelo não encontrado em {MODEL_PATH}")
+        
+    loaded = joblib.load(MODEL_PATH)
+
+    artifacts.update(loaded)
+    print("✅ Pipeline carregado com sucesso")
+    yield
+
+
+# =========================================================
+# FASTAPI
+# =========================================================
+
+app = FastAPI(
+    title="ChurnInsight API", 
+    version="1.2.1", 
+    lifespan=lifespan
+)
+
 
 # =========================
 # STARTUP
