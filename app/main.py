@@ -14,12 +14,12 @@ import os
 # =========================
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "model" / "model.joblib"
+MODEL_PATH = BASE_DIR / "models" / "model.joblib"
 
 artifacts = {}
 
 # =========================
-# Lifespan - carga do modelo
+# Lifespan
 # =========================
 
 @asynccontextmanager
@@ -110,7 +110,7 @@ def health():
     }
 
 # =========================
-# Previsão unitária
+# Previsão
 # =========================
 
 @app.post("/previsao", response_model=PredictionOutput)
