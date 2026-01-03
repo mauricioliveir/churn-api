@@ -7,10 +7,11 @@ import pandas as pd
 import numpy as np
 import joblib
 import tempfile
-import os
+import io
+import csv
 
 # =========================
-# Configuração global
+# CONFIGURAÇÕES
 # =========================
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -19,7 +20,7 @@ MODEL_PATH = BASE_DIR / "models" / "model.joblib"
 artifacts = {}
 
 # =========================
-# Lifespan
+# LIFESPAN DO APP
 # =========================
 
 @asynccontextmanager
@@ -40,7 +41,7 @@ app = FastAPI(
 )
 
 # =========================
-# Schemas
+# SCHEMAS
 # =========================
 
 class CustomerInput(BaseModel):
@@ -60,7 +61,7 @@ class PredictionOutput(BaseModel):
     explicabilidade: list | None
 
 # =========================
-# Utilidades
+# UTILS
 # =========================
 
 def gerar_recomendacao(risco: str) -> str:
@@ -99,7 +100,7 @@ def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df[artifacts["columns"]]
 
 # =========================
-# Health check
+# HEALTH CHECK
 # =========================
 
 @app.get("/health")
@@ -110,7 +111,7 @@ def health():
     }
 
 # =========================
-# Previsão
+# ENDPOINT DE PREVISÃO
 # =========================
 
 @app.post("/previsao", response_model=PredictionOutput)
@@ -147,9 +148,9 @@ def predict_churn(data: CustomerInput):
         explicabilidade=explicabilidade
     )
 
-# =========================
-# Previsão em lote (CSV)
-# =========================
+# =============================
+# ENDPOINT DE PREVISÃO EM LOTE
+# =============================
 
 @app.post("/previsao-lote")
 def previsao_lote(file: UploadFile = File(...)):
