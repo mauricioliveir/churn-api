@@ -214,23 +214,29 @@ def predict_churn(data: CustomerInput):
 # ENDPOINT PREVISAO LOTE
 # =========================================================
 @app.post("/previsao-lote")
-def previsao_lote(file: UploadFile = File(...)):
+async def previsao_lote(file: UploadFile = File(...)):
 
     if not artifacts:
         raise HTTPException(status_code=503, detail="Modelo não carregado")
 
-    if not file.filename.endswith(".csv"):
+    if not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Arquivo deve ser CSV")
 
-    df = pd.read_csv(file.file)
+    import io
 
-    colunas_necessarias = artifacts["raw_columns"]
-    colunas_faltantes = set(colunas_necessarias) - set(df.columns)
+    contents = await file.read()
+    df = pd.read_csv(io.BytesIO(contents))
 
-    if colunas_faltantes:
+    colunas_necessarias = [
+        "CreditScore", "Geography", "Gender",
+        "Age", "Tenure", "Balance", "EstimatedSalary"
+    ]
+
+    faltantes = set(colunas_necessarias) - set(df.columns)
+    if faltantes:
         raise HTTPException(
             status_code=400,
-            detail=f"Colunas ausentes no CSV: {list(colunas_faltantes)}"
+            detail=f"Colunas ausentes: {list(faltantes)}"
         )
 
     threshold = artifacts["threshold_cost"]
@@ -238,79 +244,56 @@ def previsao_lote(file: UploadFile = File(...)):
 
     for _, row in df.iterrows():
 
-        problemas = []
+        input_dict = row.to_dict()
+        df_linha = pd.DataFrame([input_dict])
 
-        for col in colunas_necessarias:
-            if pd.isna(row[col]):
-                problemas.append(col)
+        df_linha["Geography_Germany"] = int(row["Geography"] == "Germany")
+        df_linha["Geography_Spain"] = int(row["Geography"] == "Spain")
+        df_linha["Gender_Male"] = int(row["Gender"] == "Male")
 
-        for col, stats in artifacts["numeric_stats"].items():
-            if col in row and not pd.isna(row[col]):
-                z = abs((row[col] - stats["mean"]) / stats["std"])
-                if z > 3:
-                    problemas.append(col)
+        df_linha["Balance_Salary_Ratio"] = row["Balance"] / (row["EstimatedSalary"] + 1)
+        df_linha["Age_Tenure"] = row["Age"] * row["Tenure"]
 
-        erro_linha = len(problemas) > 0
+        df_linha["High_Value_Customer"] = int(
+            row["Balance"] > artifacts["balance_median"] and
+            row["EstimatedSalary"] > artifacts["salary_median"]
+        )
+
+        for col in artifacts["columns"]:
+            if col not in df_linha:
+                df_linha[col] = 0
+
+        df_linha = df_linha[artifacts["columns"]]
+        X_scaled = artifacts["scaler"].transform(df_linha)
+
+        proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
+
+        if proba >= threshold:
+            risco = "ALTO"
+            previsao = "Vai Sair"
+        elif proba >= 0.20:
+            risco = "MÉDIO"
+            previsao = "Vai Sair"
+        else:
+            risco = "BAIXO"
+            previsao = "Vai Ficar"
+
         explicabilidade = None
-
-        try:
-            input_dict = row.to_dict()
-            df_linha = pd.DataFrame([input_dict])
-
-            df_linha["Geography_Germany"] = int(row["Geography"] == "Germany")
-            df_linha["Geography_Spain"] = int(row["Geography"] == "Spain")
-            df_linha["Gender_Male"] = int(row["Gender"] == "Male")
-
-            df_linha["Balance_Salary_Ratio"] = row["Balance"] / (row["EstimatedSalary"] + 1)
-            df_linha["Age_Tenure"] = row["Age"] * row["Tenure"]
-
-            df_linha["High_Value_Customer"] = int(
-                row["Balance"] > artifacts["balance_median"] and
-                row["EstimatedSalary"] > artifacts["salary_median"]
+        if risco == "ALTO":
+            explicabilidade = calcular_explicabilidade_local(
+                artifacts["model"],
+                X_scaled,
+                artifacts["columns"],
+                proba,
+                input_dict
             )
-
-            for col in artifacts["columns"]:
-                if col not in df_linha:
-                    df_linha[col] = 0
-
-            df_linha = df_linha[artifacts["columns"]]
-            X_scaled = artifacts["scaler"].transform(df_linha)
-
-            proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
-
-            if proba >= threshold:
-                risco = "ALTO"
-                previsao = "Vai Sair"
-            elif proba >= 0.20:
-                risco = "MÉDIO"
-                previsao = "Vai Sair"
-            else:
-                risco = "BAIXO"
-                previsao = "Vai Ficar"
-
-            if risco == "ALTO":
-                explicabilidade = calcular_explicabilidade_local(
-                    artifacts["model"],
-                    X_scaled,
-                    artifacts["columns"],
-                    proba,
-                    input_dict
-                )
-
-        except Exception:
-            previsao = "Erro"
-            risco = "Erro"
-            proba = None
-            problemas.append("Erro processamento")
 
         resultados.append({
             **row.to_dict(),
             "previsao": previsao,
-            "probabilidade": float(f"{proba:.2f}") if proba is not None else None,
+            "probabilidade": float(f"{proba:.2f}"),
             "nivel_risco": risco,
-            "explicabilidade": "|".join(explicabilidade) if explicabilidade else None,
-            "erro_linha": erro_linha,
-            "colunas_problema": ",".join(set(problemas))
+            "explicabilidade": "|".join(explicabilidade) if explicabilidade else None
         })
 
     df_resultado = pd.DataFrame(resultados)
@@ -324,6 +307,7 @@ def previsao_lote(file: UploadFile = File(...)):
         media_type="text/csv",
         filename=nome_saida
     )
+
 
 # =========================================================
 # HEALTH
