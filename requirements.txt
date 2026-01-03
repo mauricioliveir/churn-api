@@ -8,3 +8,5 @@ pydantic>=2.0,<3.0
 pyarrow
 pytest
 httpx
+python-multipart
+
