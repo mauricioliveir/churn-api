@@ -71,33 +71,24 @@ def calcular_explicabilidade_local(
     baseline_proba: float, 
     input_data: dict 
 ) -> Dict[str, str]:
-    """
-    Retorna apenas as 3 principais features do contrato original
-    """
-    
-    # Mapeamento das features internas para features do contrato
+
     mapeamento_para_contrato = {
-        # Features originais do contrato
         "CreditScore": "CreditScore",
         "Age": "Age",
         "Tenure": "Tenure",
         "Balance": "Balance",
         "EstimatedSalary": "EstimatedSalary",
-        
-        # Features one-hot encoding mapeadas para os campos originais
+
         "Geography_Germany": "Geography",
         "Geography_Spain": "Geography",
-        
-        # Gender one-hot
+
         "Gender_Male": "Gender",
-        
-        # Features engenheiradas mapeadas para features relacionadas
+
         "Balance_Salary_Ratio": "Balance",
         "Age_Tenure": "Age",
         "High_Value_Customer": "Balance"
     }
-    
-    # Mapeamento dos nomes originais para exibição
+
     nome_para_exibicao = {
         "CreditScore": "CreditScore",
         "Age": "Age",
@@ -107,12 +98,10 @@ def calcular_explicabilidade_local(
         "Geography": "Geography",
         "Gender": "Gender"
     }
-    
-    # Obter valores dos campos ENUM do input
+
     geography_value = input_data.get("Geography")
     gender_value = input_data.get("Gender")
 
-    # Calcular impacto de cada feature
     impactos = []
     for i, feature in enumerate(feature_names):
         X_mod = X.copy()
@@ -121,16 +110,13 @@ def calcular_explicabilidade_local(
         impacto = abs(baseline_proba - proba_mod)
         impactos.append((feature, impacto))
 
-    # Ordenar por impacto (maior impacto primeiro)
     impactos_ordenados = sorted(impactos, key=lambda x: x[1], reverse=True)
    
-    # Coletar as 3 principais features do contrato
     features_contrato = []
     for feat_interna, _ in impactos_ordenados:
         feature_contrato = mapeamento_para_contrato.get(feat_interna)
         
         if feature_contrato and feature_contrato not in features_contrato:
-            # Para campos ENUM, retornar o valor específico
             if feature_contrato == "Geography" and geography_value:
                 features_contrato.append(geography_value)
             elif feature_contrato == "Gender" and gender_value:
@@ -140,8 +126,7 @@ def calcular_explicabilidade_local(
         
         if len(features_contrato) >= 3:
             break
-    
-    # Criar dicionário no formato solicitado
+
     explicabilidade_dict = {}
     for i, feature in enumerate(features_contrato, 1):
         explicabilidade_dict[f"feature_{i}"] = feature
@@ -177,17 +162,12 @@ def predict_churn(data: CustomerInput):
 
     input_dict = data.model_dump()
     df = pd.DataFrame([input_dict])
-
-    # 1. One-hot encoding (Sync com Notebook)
     df["Geography_Germany"] = 1 if data.Geography == "Germany" else 0
     df["Geography_Spain"] = 1 if data.Geography == "Spain" else 0
     df["Gender_Male"] = 1 if data.Gender == "Male" else 0
-
-    # 2. Feature Engineering
     df["Balance_Salary_Ratio"] = df["Balance"] / (df["EstimatedSalary"] + 1)
     df["Age_Tenure"] = df["Age"] * df["Tenure"]
     
-    # Calcular medianas dos artifacts
     balance_median = artifacts.get("balance_median", 0)
     salary_median = artifacts.get("salary_median", 0)
     
@@ -196,23 +176,18 @@ def predict_churn(data: CustomerInput):
         (df["EstimatedSalary"] > salary_median)
     ).astype(int)
 
-    # 3. Garantir que todas as colunas necessárias existam
     required_columns = artifacts.get("columns", [])
     
-    # Adicionar colunas que podem estar faltando
     for col in required_columns:
         if col not in df.columns:
-            df[col] = 0  # Valor padrão para colunas categóricas ausentes
+            df[col] = 0
     
-    # Ordenar as colunas na ordem esperada pelo modelo
     df_final = df[required_columns]
 
-    # 4. Escalonamento e Predição
     X_scaled = artifacts["scaler"].transform(df_final)
     proba = float(artifacts["model"].predict_proba(X_scaled)[0, 1])
     threshold = artifacts.get("threshold", 0.5)
 
-    # 5. Definição de Risco (Conforme Notebook)
     if proba >= 0.5:
         risco = "ALTO"
     elif proba >= 0.3:
