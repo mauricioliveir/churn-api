@@ -16,7 +16,6 @@ def test_previsao_lote_fluxo_completo(client):
     assert r.status_code == 200
     job_id = r.json()["job_id"]
 
-    # polling simples
     for _ in range(10):
         status = client.get(f"/previsao-lote/status/{job_id}").json()
         if status["status"] == "FINALIZADO":
