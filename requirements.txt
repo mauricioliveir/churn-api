@@ -9,4 +9,5 @@ pyarrow
 pytest
 httpx
 python-multipart
+requests==2.31.0
 

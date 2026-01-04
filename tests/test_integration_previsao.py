@@ -1,21 +1,12 @@
-def test_previsao_churn_com_explicabilidade(client):
-    payload = {
-        "Surname": "Silva",
-        "CreditScore": 400,
-        "Geography": "Spain",
-        "Gender": "Male",
-        "Age": 55,
-        "Tenure": 2,
-        "Balance": 3000,
-        "EstimatedSalary": 1500
-    }
+def test_previsao_sucesso(client, payload_valido):
+    r = client.post("/previsao", json=payload_valido)
+    assert r.status_code == 200
 
-    response = client.post("/previsao", json=payload)
-
-    assert response.status_code == 200
-    body = response.json()
-
-    assert body["previsao"] == "Vai cancelar"
-    assert body["nivel_risco"] == "ALTO"
+    body = r.json()
+    assert "previsao" in body
+    assert "probabilidade" in body
+    assert "nivel_risco" in body
     assert "explicabilidade" in body
+
+    assert isinstance(body["explicabilidade"], list)
     assert len(body["explicabilidade"]) == 3

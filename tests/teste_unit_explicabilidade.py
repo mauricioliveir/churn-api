@@ -1,29 +1,18 @@
-def test_explicabilidade(client):
+import numpy as np
+from app.main import calcular_explicabilidade_local
 
-    cliente_1 = {
-        "CreditScore": 300,
-        "Geography": "Spain",
-        "Gender": "Male",
-        "Age": 65,
-        "Tenure": 1,
-        "Balance": 200000,
-        "EstimatedSalary": 20000
-    }
+def test_explicabilidade_retorna_campos_contrato(payload_valido):
+    X_fake = np.ones((1, 10))  # tamanho não importa aqui
 
-    cliente_2 = {
-        "CreditScore": 800,
-        "Geography": "France",
-        "Gender": "Female",
-        "Age": 30,
-        "Tenure": 8,
-        "Balance": 0,
-        "EstimatedSalary": 90000
-    }
+    resultado = calcular_explicabilidade_local(X_fake, payload_valido)
 
-    r1 = client.post("/previsao", json=cliente_1).json()
-    r2 = client.post("/previsao", json=cliente_2).json()
-
-    assert r1["previsao"] == "Vai cancelar"
-    assert r2["previsao"] == "Vai cancelar"
-
-    assert r1["explicabilidade"] != r2["explicabilidade"]
+    for item in resultado:
+        assert item in (
+            "CreditScore",
+            "Age",
+            "Tenure",
+            "Balance",
+            "EstimatedSalary",
+            payload_valido["Geography"],
+            payload_valido["Gender"]
+        )

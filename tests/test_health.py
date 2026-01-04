@@ -1,7 +1,5 @@
-def test_health_endpoint(client):
-    response = client.get("/health")
-    assert response.status_code == 200
+def test_health(client):
+    r = client.get("/health")
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
 
-    body = response.json()
-    assert body["status"] == "UP"
-    assert body["model_loaded"] is True

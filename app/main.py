@@ -47,7 +47,7 @@ def load_artifacts():
     print("✅ Modelo carregado com sucesso")
 
 # =========================================================
-# ROOT / HEALTH / HEAD
+# ENDPOINT / e /HEAD
 # =========================================================
 
 @app.get("/")
@@ -60,14 +60,20 @@ def root():
         "version": "2.0.0",
         "environment": "render"
     }
-
+    
+# =========================================================
+# ENDPOINT /HEALTH
+# =========================================================
 @app.get("/health")
 def health():
     return {
         "status": "ok",
         "model_loaded": bool(artifacts)
     }
-
+    
+# =========================================================
+# ENDPOINT /favicon.ico
+# =========================================================
 @app.get("/favicon.ico")
 def favicon():
     return Response(status_code=204)
@@ -75,7 +81,6 @@ def favicon():
 # =========================================================
 # PREPARAÇÃO DE DADOS
 # =========================================================
-
 def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df = pd.get_dummies(df, columns=["Geography", "Gender"], drop_first=True)
 
@@ -94,12 +99,8 @@ FEATURE_MAP = {
     "Tenure": "Tenure",
     "Balance": "Balance",
     "EstimatedSalary": "EstimatedSalary",
-
-    # Features derivadas
     "Age_Tenure": "Age",
     "Balance_Salary": "Balance",
-
-    # Enums (One-Hot)
     "Geography_France": "Geography",
     "Geography_Spain": "Geography",
     "Geography_Germany": "Geography",
@@ -107,11 +108,9 @@ FEATURE_MAP = {
     "Gender_Female": "Gender",
 }
 
-
 # =========================================================
 # EXPLICABILIDADE LOCAL (TOP 3)
 # =========================================================
-
 def calcular_explicabilidade_local(
     X_scaled: np.ndarray,
     payload: Dict
@@ -151,9 +150,8 @@ def calcular_explicabilidade_local(
     return explicabilidade
 
 # =========================================================
-# ENDPOINT /previsao
+# ENDPOINT /PREVISAO
 # =========================================================
-
 @app.post("/previsao")
 def previsao(payload: Dict):
     if not artifacts:
@@ -184,7 +182,7 @@ def previsao(payload: Dict):
     threshold = artifacts["threshold_cost"]
 
     risco = "ALTO" if proba >= threshold else "BAIXO"
-    previsao = "Vai cancelar" if risco == "ALTO" else "Vai permanecer"
+    previsao = "Vai cancelar" if risco == "ALTO" else "Vai continuar"
 
     explicabilidade = calcular_explicabilidade_local(X_scaled, payload)
 
@@ -203,7 +201,6 @@ def previsao(payload: Dict):
 # =========================================================
 # PROCESSAMENTO EM BACKGROUND
 # =========================================================
-
 def processar_csv(job_id: str, input_path: Path):
     try:
         df = pd.read_csv(input_path)
@@ -219,7 +216,7 @@ def processar_csv(job_id: str, input_path: Path):
         df["previsao"] = np.where(
             df["nivel_risco"] == "ALTO",
             "Vai cancelar",
-            "Vai permanecer"
+            "Vai continuar"
         )
 
         output = TMP_DIR / f"{job_id}_resultado.csv"
@@ -229,9 +226,8 @@ def processar_csv(job_id: str, input_path: Path):
         (TMP_DIR / f"{job_id}.error").write_text(str(e))
 
 # =========================================================
-# ENDPOINT PREVISÃO EM LOTE
+# ENDPOINT /PREVISAO-LOTE
 # =========================================================
-
 @app.post("/previsao-lote")
 def previsao_lote(
     file: UploadFile = File(...),
@@ -252,7 +248,9 @@ def previsao_lote(
         "job_id": job_id,
         "status": "PROCESSANDO"
     }
-
+# =========================================================
+# ENDPOINT /PREVISAO-LOTE/STATUS
+# =========================================================
 @app.get("/previsao-lote/status/{job_id}")
 def status_lote(job_id: str):
     if (TMP_DIR / f"{job_id}.error").exists():
@@ -263,6 +261,9 @@ def status_lote(job_id: str):
 
     return {"status": "PROCESSANDO"}
 
+# =========================================================
+# ENDPOINT /PREVISAO-LOTE/DOWNLOAD
+# =========================================================
 @app.get("/previsao-lote/download/{job_id}")
 def download(job_id: str):
     path = TMP_DIR / f"{job_id}_resultado.csv"

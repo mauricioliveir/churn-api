@@ -1,6 +1,5 @@
 import requests
 import time
-import os
 
 URL = "https://churn-hackathon.onrender.com/previsao"
 
@@ -31,7 +30,6 @@ for i, cliente in enumerate(clientes_alto_risco, 1):
     except Exception as e:
         print(f"Falha de conexão no teste {i}: {e}")
     
-    # Pausa de meio segundo entre as chamadas para respeitar o limite do Render Free Tier
     time.sleep(0.5) 
 
-print("🏁 Teste de integração concluído com sucesso!")
+print("🏁 Teste de stress concluído com sucesso!")
