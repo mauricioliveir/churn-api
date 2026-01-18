@@ -10,4 +10,5 @@ pytest
 httpx
 python-multipart
 requests==2.31.0
-
+mysql-connector-python
+python-dotenv
