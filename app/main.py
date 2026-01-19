@@ -3,7 +3,6 @@ from typing import Dict, List, Literal
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
-
 import uuid
 import joblib
 import shutil
@@ -19,7 +18,7 @@ MODEL_PATH = BASE_DIR / "models" / "model.joblib"
 TMP_DIR = Path(tempfile.gettempdir())
 
 # =========================================================
-# SCHEMA DE VALIDAÇÃO
+# SCHEMA DE VALIDAÃÃO
 # =========================================================
 class ChurnPayload(BaseModel):
     CreditScore: int = Field(..., ge=350, le=850)
@@ -28,11 +27,12 @@ class ChurnPayload(BaseModel):
     Age: int = Field(..., ge=18, le=92)
     Tenure: int = Field(..., ge=0, le=10)
     Balance: float = Field(..., ge=0, le=500000)
-    EstimatedSalary: float
+    EstimatedSalary: float = Field(..., ge=0, le=200000)
 
 # =========================================================
-# ARTEFATOS / MODELO
+# APP
 # =========================================================
+app = FastAPI(title="Churn API", version="12.1.0")
 artifacts: Dict = {}
 model_loaded = False
 
@@ -42,13 +42,11 @@ model_loaded = False
 @app.on_event("startup")
 def load_artifacts():
     global model_loaded
-
     if not MODEL_PATH.exists():
         raise RuntimeError(f"Modelo não encontrado em {MODEL_PATH}")
 
     loaded = joblib.load(MODEL_PATH)
 
-    # compat (se existir chave antiga)
     if "threshold" in loaded:
         loaded["threshold_cost"] = loaded["threshold"]
 
@@ -67,10 +65,8 @@ def load_artifacts():
 
     artifacts.update(loaded)
     model_loaded = True
-    print("✅ Artefatos carregados com sucesso!")
-
-    _init_db_pool()
-
+    
+    print(" Artefatos carregados com sucesso!")
 
 # =========================================================
 # ENDPOINT / e /HEAD
@@ -83,7 +79,7 @@ def root():
         "status": "online",
         "model_loaded": model_loaded,
         "version": "12.1.0",
-        "environment": "render"
+        "environment": "OCI Plataform"
     }
 
 # =========================================================
@@ -91,7 +87,10 @@ def root():
 # =========================================================
 @app.get("/health")
 def health():
-    return {"status": "ok", "model_loaded": model_loaded}
+    return {
+        "status": "ok",
+        "model_loaded": model_loaded
+    }
 
 # =========================================================
 # ENDPOINT /favicon.ico
@@ -100,9 +99,8 @@ def health():
 def favicon():
     return Response(status_code=204)
 
-
 # =========================================================
-# FUNÇÕES AUXILIARES DO MODELO
+# PREPARAÇÃO DE DADOS
 # =========================================================
 def preparar_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df_proc = pd.get_dummies(df, columns=["Geography", "Gender"], drop_first=True)
@@ -129,21 +127,19 @@ FEATURE_MAP = {
 def calcular_explicabilidade_local(X_scaled: np.ndarray, payload_dict: Dict) -> list[str]:
     model = artifacts["model"]
     features = artifacts["columns"]
-
     importances = model.feature_importances_
     impactos = importances * np.abs(X_scaled[0])
-
-    impacto_por_contrato: Dict[str, float] = {}
+    
+    impacto_por_contrato = {}
     for feature, impacto in zip(features, impactos):
-        campo = FEATURE_MAP.get(feature, feature)
+        campo = FEATURE_MAP.get(feature)
         if campo:
-            impacto_por_contrato[campo] = impacto_por_contrato.get(campo, 0) + float(impacto)
-
+            impacto_por_contrato[campo] = impacto_por_contrato.get(campo, 0) + impacto
+    
     ranking = sorted(impacto_por_contrato.items(), key=lambda x: x[1], reverse=True)
-
-    explicabilidade: List[str] = []
+    
+    explicabilidade = []
     seen = set()
-
     for campo, _ in ranking:
         if campo not in seen:
             seen.add(campo)
@@ -185,33 +181,26 @@ def obter_explicabilidade_lote(X_scaled: np.ndarray, chunk_df: pd.DataFrame, mas
     model = artifacts["model"]
     features = artifacts["columns"]
     importances = model.feature_importances_
-
     impactos_matriz = np.abs(X_scaled) * importances
     nomes_campos = np.array([FEATURE_MAP.get(f, f) for f in features])
-
-    resultados: List[str] = []
+    
+    resultados = []
     for i in range(impactos_matriz.shape[0]):
         if not mask_cancelar[i]:
             resultados.append("")
             continue
         indices = np.argsort(impactos_matriz[i])[::-1]
         final_names, seen = [], set()
-
         for idx in indices:
             nome = nomes_campos[idx]
-            if nome in seen:
-                continue
-            seen.add(nome)
-            final_names.append(str(chunk_df.iloc[i][nome]) if nome in ["Geography", "Gender"] else nome)
-            if len(final_names) == 3:
-                break
-
+            if nome not in seen:
+                seen.add(nome)
+                final_names.append(str(chunk_df.iloc[i][nome]) if nome in ["Geography", "Gender"] else nome)
+            if len(final_names) == 3: break
         resultados.append(", ".join(final_names))
-
     return resultados
 
-
-def processar_csv(jobid: str, inputpath: Path):
+def processar_csv(job_id: str, input_path: Path):
     try:
         output_path = TMP_DIR / f"{job_id}_resultado.csv"
         is_first = True
@@ -240,47 +229,7 @@ def processar_csv(jobid: str, inputpath: Path):
             is_first = False
         if input_path.exists(): input_path.unlink()
     except Exception as e:
-        (TMP_DIR / f"{jobid}.error").write_text(str(e))
-
-
-# =========================================================
-# ENDPOINTS DE PREVISÃO
-# =========================================================
-@app.post(
-    "/previsao",
-    tags=["previsao"],
-    response_model=ChurnPredictionResponse,
-    summary="Predição unitária de churn",
-)
-def previsao(payload: ChurnPayload):
-    if not model_loaded:
-        raise HTTPException(status_code=503, detail="Modelo não carregado")
-
-    data = payload.model_dump()
-    df = pd.DataFrame([data])
-    dfproc = preparar_dataframe(df)
-
-    Xscaled = artifacts["scaler"].transform(dfproc)
-    proba = float(artifacts["model"].predict_proba(Xscaled)[0, 1])
-
-    risco = "ALTO" if proba >= artifacts["threshold_cost"] else "BAIXO"
-    previsaotxt = "Vai cancelar" if risco == "ALTO" else "Vai continuar"
-    explicabilidade = calcular_explicabilidade_local(Xscaled, data) if risco == "ALTO" else []
-
-    resp = {
-        "previsao": previsaotxt,
-        "probabilidade": round(proba, 4),
-        "nivel_risco": risco,
-        "explicabilidade": explicabilidade,
-    }
-
-    try:
-        persist_previsao_individual(data, resp)
-    except Exception:
-        pass
-
-    return resp
-
+        (TMP_DIR / f"{job_id}.error").write_text(str(e))
 
 # =========================================================
 # ENDPOINT /PREVISAO-LOTE
